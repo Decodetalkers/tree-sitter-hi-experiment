@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use lsp_types::{SemanticToken, SemanticTokenTypes};
-use tree_sitter::{Node, Parser, Query, QueryCursor, Range, StreamingIterator};
+use tree_sitter::{Node, Parser, Point, Query, QueryCursor, Range, StreamingIterator};
 
 const SOURCE_FILE: &str = include_str!("../misc/error.cmake");
 
@@ -136,6 +136,65 @@ impl<'a> HighLightNode<'a> {
         self.children.sort();
         true
     }
+    fn to_semantic_tokens(&self, cursor: &mut Point, source: &str) -> Vec<SemanticToken> {
+        assert!(self.children.is_sorted());
+        let Some(otoken) = self.hl_token_index(source) else {
+            return vec![];
+        };
+        let mut tokens = vec![];
+        let range = self.range();
+        let start_byte = range.start_byte;
+        let end_byte = range.end_byte;
+        let end_point = range.end_point;
+
+        let mut current_start_point = range.start_point;
+        let mut current_byte = start_byte;
+        for node in &self.children {
+            if node.hl_token(source).is_none() {
+                continue;
+            };
+            let child_range = node.range();
+            let child_start_point = child_range.start_point;
+            let child_end_point = child_range.end_point;
+            assert!(
+                child_start_point.row > cursor.row
+                    || (child_start_point.row == cursor.row
+                        && child_start_point.column >= cursor.column)
+            );
+
+            // Insert the origin highlight
+            if child_start_point.row != cursor.row || child_start_point.column - cursor.column > 1 {
+                tokens.push(SemanticToken {
+                    delta_line: (current_start_point.row - cursor.row) as u32,
+                    delta_start: (current_start_point.column - cursor.column) as u32,
+                    length: (child_range.start_byte - current_byte) as u32,
+                    token_type: otoken,
+                    token_modifiers_bitset: 0,
+                });
+            }
+
+            tokens.extend(node.to_semantic_tokens(cursor, source));
+
+            current_start_point = child_end_point;
+            current_byte = child_range.end_byte;
+        }
+
+        if end_point.row > cursor.row
+            || (end_point.row == cursor.row && end_point.column > cursor.column)
+        {
+            tokens.push(SemanticToken {
+                delta_line: (end_point.row - cursor.row) as u32,
+                delta_start: (end_point.column - cursor.column) as u32,
+                length: (end_byte - current_byte) as u32,
+                token_type: otoken,
+                token_modifiers_bitset: 0,
+            });
+        }
+
+        *cursor = end_point;
+
+        tokens
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -171,6 +230,21 @@ impl<'a> HighLightNodeContainer<'a> {
             children: Vec::new(),
         });
         self.nodes.sort();
+    }
+
+    fn to_semantic_tokens(&self, source: &str) -> Vec<SemanticToken> {
+        assert!(self.nodes.is_sorted());
+        let mut cursor = Point::new(0, 0);
+        let mut tokens = vec![];
+        for node in &self.nodes {
+            let start_point = node.range().start_point;
+            if start_point.row > cursor.row {
+                cursor.row = start_point.row;
+                cursor.column = 0;
+            }
+            tokens.extend(node.to_semantic_tokens(&mut cursor, source));
+        }
+        tokens
     }
 }
 
@@ -209,4 +283,6 @@ fn main() {
         }
     }
     println!("{container:?}");
+    let hl = container.to_semantic_tokens(SOURCE_FILE);
+    println!("{hl:?}");
 }
